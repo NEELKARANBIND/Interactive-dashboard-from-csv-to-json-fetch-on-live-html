@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Metaverse & VR Sales Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Plotly CDN (latest as of writing; plotly will auto-fallback if updated) -->
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin: 12px; background:#f7f8fb; color:#111; }
+    header { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
+    header h1 { font-size:1.15rem; margin:0; }
+    #controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .grid { display:grid; gap:12px; grid-template-columns: 1fr 1fr; }
+    .full { grid-column: 1 / -1; }
+    .card { background:white; padding:10px; border-radius:8px; box-shadow:0 1px 6px rgba(20,30,60,0.06); }
+    label { font-size:0.9rem; }
+    select, input[type="range"] { padding:6px; border-radius:6px; border:1px solid #d0d5de; }
+    .small { font-size:0.9rem; color:#444; }
+    #charts { margin-top:8px; }
+    .chart { min-height:300px; }
+    #topRow { display:flex; gap:12px; }
+    .col { flex:1; }
+    footer { margin-top:12px; font-size:0.9rem; color:#666; }
+    button { padding:8px 10px; border-radius:6px; border:0; background:#2b8cff; color:white; cursor:pointer; }
+    button.secondary { background:#6b7280; }
+    @media (max-width:900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Metaverse & VR — Interactive Sales Dashboard</h1>
+    <div id="controls">
+      <input id="fileInput" type="file" accept=".json,application/json" />
+      <button id="loadSample">Load sample data (from server)</button>
+      <button id="resetFilters" class="secondary">Reset filters</button>
+      <div style="margin-left:8px" class="small">Filter: <select id="regionFilter"><option value="All">All Regions</option></select></div>
+      <div class="small">Country: <select id="countryFilter"><option value="All">All Countries</option></select></div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card full">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div><strong>Data Inspector</strong><div class="small" id="dataSummary">No data loaded yet.</div></div>
+        <div class="small">Year range: <span id="yearRange">—</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div><strong>1) VR Device Sales Over Time</strong></div>
+      <div id="salesTime" class="chart"></div>
+    </div>
+
+    <div class="card">
+      <div><strong>2) Metaverse Revenue by Country</strong></div>
+      <div id="revenueByCountry" class="chart"></div>
+    </div>
+
+    <div class="card">
+      <div><strong>3) User Base Growth Rate (%)</strong></div>
+      <div id="growthRate" class="chart"></div>
+    </div>
+
+    <div class="card">
+      <div><strong>4) Average Session Time (mins/day)</strong></div>
+      <div id="sessionTime" class="chart"></div>
+    </div>
+
+    <div class="card full">
+      <div><strong>5) Investment vs Revenue (Bubble / Scatter)</strong></div>
+      <div id="investmentRevenue" class="chart"></div>
+    </div>
+  </div>
+
+  <footer>
+    Tips: Upload your JSON file with the same structure as your example (Year, Region, Country, Users (Millions), VR Device Sales, Avg Session Time (mins/day), Metaverse Revenue ($B), Growth Rate (%), Investment ($M)). Use the Region & Country dropdowns to filter and explore. The "Load sample data" button attempts to fetch: <code>/mnt/data/davis metaverse_vr project_yourgpt.json</code>.
+  </footer>
+
+<script>
+/*
+  Dashboard script
+  - Accepts a JSON array of records (like the sample provided)
+  - Builds five interactive Plotly charts
+  - Filters by Region and Country
+  - Citation: sample file path referenced in the surrounding environment.
+*/
+
+const sampleUrl = '/mnt/data/davis metaverse_vr project_yourgpt.json'; // environment-provided sample file path
+
+let rawData = [];      // original records
+let workingData = [];  // filtered / normalized records
+
+// Basic helpers: parse numbers robustly
+function toNum(v) {
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === 'number') return v;
+  // remove commas, $ signs and units
+  const cleaned = String(v).replace(/[^0-9.\-]/g, '');
+  return cleaned === '' ? NaN : Number(cleaned);
+}
+
+// Normalize incoming array of objects
+function normalize(data) {
+  return data.map(r => {
+    return {
+      Year: Number(r.Year),
+      Region: r.Region || 'Unknown',
+      Country: r.Country || 'Unknown',
+      Users: toNum(r['Users (Millions)'] ?? r.Users ?? 0),
+      VRDeviceSales: toNum(r['VR Device Sales'] ?? r['VRDeviceSales'] ?? r['VR Device Sales']),
+      AvgSessionMins: toNum(r['Avg Session Time (mins/day)'] ?? r['Avg Session Time (mins/day)'] ?? r['AvgSessionTime']),
+      MetaverseRevenueB: toNum(r['Metaverse Revenue ($B)'] ?? r['MetaverseRevenue'] ?? 0),
+      GrowthRatePct: toNum(r['Growth Rate (%)'] ?? r['GrowthRate'] ?? 0),
+      InvestmentM: toNum(r['Investment ($M)'] ?? r['Investment'] ?? 0)
+    };
+  }).filter(r => !isNaN(r.Year)); // require valid Year
+}
+
+function summarizeData(data) {
+  if (!data || data.length === 0) return 'No data loaded.';
+  const years = data.map(d => d.Year);
+  const minY = Math.min(...years), maxY = Math.max(...years);
+  return `${data.length} records • Years ${minY} — ${maxY} • Regions: ${[...new Set(data.map(d => d.Region))].join(', ')}`;
+}
+
+function populateFilters(data) {
+  const regionSelect = document.getElementById('regionFilter');
+  const countrySelect = document.getElementById('countryFilter');
+  const regions = ['All', ...Array.from(new Set(data.map(d=>d.Region)))];
+  const countries = ['All', ...Array.from(new Set(data.map(d=>d.Country)))];
+
+  regionSelect.innerHTML = regions.map(r=>`<option value="${r}">${r}</option>`).join('');
+  countrySelect.innerHTML = countries.map(c=>`<option value="${c}">${c}</option>`).join('');
+}
+
+// Apply filters, build workingData and update displays
+function applyFilters() {
+  const region = document.getElementById('regionFilter').value;
+  const country = document.getElementById('countryFilter').value;
+
+  workingData = rawData.filter(d => {
+    if (region && region !== 'All' && d.Region !== region) return false;
+    if (country && country !== 'All' && d.Country !== country) return false;
+    return true;
+  });
+
+  document.getElementById('dataSummary').textContent = summarizeData(workingData);
+  const yrs = workingData.map(d=>d.Year);
+  document.getElementById('yearRange').textContent = yrs.length ? `${Math.min(...yrs)} — ${Math.max(...yrs)}` : '—';
+  drawAllCharts();
+}
+
+// Chart 1: VR Device Sales Over Time (Line)
+function drawSalesTime() {
+  const grouped = {};
+  workingData.forEach(d => {
+    grouped[d.Year] = (grouped[d.Year] || 0) + (isNaN(d.VRDeviceSales) ? 0 : d.VRDeviceSales);
+  });
+  const years = Object.keys(grouped).map(y=>Number(y)).sort((a,b)=>a-b);
+  const values = years.map(y=>grouped[y]);
+
+  const trace = {
+    x: years,
+    y: values,
+    mode: 'lines+markers',
+    name: 'VR Device Sales',
+    hovertemplate: 'Year: %{x}<br>Sales: %{y:,}<extra></extra>'
+  };
+
+  const layout = {
+    margin:{t:30,l:60,r:20,b:50},
+    yaxis:{title:'VR Device Sales (units)'},
+    xaxis:{title:'Year', dtick:1, rangeslider:{visible:true}}
+  };
+
+  Plotly.react('salesTime', [trace], layout, {responsive:true});
+}
+
+// Chart 2: Metaverse Revenue by Country (Bar)
+function drawRevenueByCountry() {
+  // aggregate revenue by country (sum)
+  const grouped = {};
+  workingData.forEach(d => {
+    if (isNaN(d.MetaverseRevenueB)) return;
+    grouped[d.Country] = (grouped[d.Country] || 0) + d.MetaverseRevenueB;
+  });
+  const rows = Object.entries(grouped).map(([k,v])=>({country:k, rev:v}));
+  rows.sort((a,b)=>b.rev - a.rev);
+
+  const trace = {
+    x: rows.map(r=>r.rev),
+    y: rows.map(r=>r.country),
+    orientation: 'h',
+    type: 'bar',
+    hovertemplate: '%{y}<br>Revenue: $%{x}B<extra></extra>'
+  };
+
+  const layout = {
+    margin:{t:20,l:140,r:20,b:40},
+    xaxis:{title:'Metaverse Revenue ($B)'},
+    yaxis:{autorange:'reversed'}
+  };
+
+  Plotly.react('revenueByCountry', [trace], layout, {responsive:true});
+}
+
+// Chart 3: User Base Growth Rate (%) (Area or Line)
+function drawGrowthRate() {
+  // average growth rate per year
+  const grouped = {};
+  const counts = {};
+  workingData.forEach(d => {
+    if (isNaN(d.GrowthRatePct)) return;
+    grouped[d.Year] = (grouped[d.Year] || 0) + d.GrowthRatePct;
+    counts[d.Year] = (counts[d.Year] || 0) + 1;
+  });
+  const years = Object.keys(grouped).map(y=>Number(y)).sort((a,b)=>a-b);
+  const avg = years.map(y => grouped[y] / counts[y]);
+
+  const trace = {
+    x: years,
+    y: avg,
+    fill: 'tozeroy',
+    mode: 'lines+markers',
+    name: 'Avg Growth Rate (%)',
+    hovertemplate: 'Year: %{x}<br>Growth: %{y:.1f}%<extra></extra>'
+  };
+
+  const layout = {
+    margin:{t:20,l:60,r:20,b:50},
+    yaxis:{title:'Growth Rate (%)'},
+    xaxis:{title:'Year'}
+  };
+
+  Plotly.react('growthRate', [trace], layout, {responsive:true});
+}
+
+// Chart 4: Average Session Time (trend + single-number gauge)
+function drawSessionTime() {
+  // Trend line
+  const grouped = {};
+  const counts = {};
+  workingData.forEach(d => {
+    if (isNaN(d.AvgSessionMins)) return;
+    grouped[d.Year] = (grouped[d.Year] || 0) + d.AvgSessionMins;
+    counts[d.Year] = (counts[d.Year] || 0) + 1;
+  });
+  const years = Object.keys(grouped).map(y=>Number(y)).sort((a,b)=>a-b);
+  const avgSessions = years.map(y => grouped[y] / counts[y]);
+
+  const lineTrace = {
+    x: years,
+    y: avgSessions,
+    name: 'Avg Session (mins/day)',
+    mode: 'lines+markers',
+    hovertemplate: 'Year: %{x}<br>Avg mins/day: %{y:.1f}<extra></extra>'
+  };
+
+  // Gauge: latest year's average (if available)
+  const latest = years[years.length-1];
+  let latestVal = avgSessions[avgSessions.length-1] || 0;
+  const gaugeTrace = {
+    domain: {x:[0.68,1], y:[0,1]},
+    value: latestVal,
+    title: {text:`Latest (${latest || '—'})`},
+    type: 'indicator',
+    mode: 'gauge+number'
+  };
+
+  const layout = {
+    margin:{t:20,l:40,r:40,b:40},
+    grid: {rows:1, columns:1},
+    xaxis:{title:'Year'}
+  };
+
+  // We will draw line + gauge in one plot by combining traces and setting layout grid domain coordinates.
+  // Put line in left 0-0.65 domain, gauge in right 0.68-1 domain
+  lineTrace.xaxis = 'x';
+  lineTrace.yaxis = 'y';
+
+  // Use subplots by specifying xaxis domain in layout
+  layout.xaxis = {domain:[0,0.62], title:'Year', dtick:1, anchor:'y'};
+  layout.yaxis = {domain:[0,1], title:'Avg mins/day', anchor:'x'};
+  // gauge layout domain will be controlled by trace.domain
+
+  Plotly.react('sessionTime', [lineTrace, gaugeTrace], layout, {responsive:true});
+}
+
+// Chart 5: Investment vs Revenue (Bubble)
+function drawInvestmentRevenue() {
+  // For each record we will plot InvestmentM (x) vs MetaverseRevenueB (y). Bubble size = VRDeviceSales or Users.
+  const x = [], y = [], text = [], size = [];
+  workingData.forEach(d => {
+    if (isNaN(d.InvestmentM) || isNaN(d.MetaverseRevenueB)) return;
+    x.push(d.InvestmentM);
+    y.push(d.MetaverseRevenueB);
+    text.push(`${d.Country} (${d.Year})<br>Investment: $${d.InvestmentM}M<br>Revenue: $${d.MetaverseRevenueB}B`);
+    // size: base on VRDeviceSales if present, else Users
+    let s = !isNaN(d.VRDeviceSales) && d.VRDeviceSales>0 ? d.VRDeviceSales : (d.Users*1000 || 10);
+    // scale size for plotting
+    size.push(Math.sqrt(s) / 10 + 8);
+  });
+
+  const trace = {
+    x, y, text,
+    mode: 'markers',
+    marker: {
+      size,
+      sizemode: 'area',
+      sizeref: 1,
+      line: {width:1, color:'#333'}
+    },
+    hovertemplate: '%{text}<extra></extra>'
+  };
+
+  const layout = {
+    margin:{t:30,l:60,r:20,b:60},
+    xaxis:{title:'Investment ($M)'},
+    yaxis:{title:'Metaverse Revenue ($B)'},
+  };
+
+  Plotly.react('investmentRevenue', [trace], layout, {responsive:true});
+}
+
+function drawAllCharts() {
+  // If no working data, clear charts
+  if (!workingData || workingData.length === 0) {
+    ['salesTime','revenueByCountry','growthRate','sessionTime','investmentRevenue'].forEach(id => {
+      document.getElementById(id).innerHTML = '<div style="padding:30px;color:#666">No data to display.</div>';
+    });
+    return;
+  }
+  drawSalesTime();
+  drawRevenueByCountry();
+  drawGrowthRate();
+  drawSessionTime();
+  drawInvestmentRevenue();
+}
+
+// Load JSON content (from File or fetch)
+function handleJSONLoad(jsonData) {
+  try {
+    const parsed = Array.isArray(jsonData) ? jsonData : JSON.parse(jsonData);
+    rawData = normalize(parsed);
+    populateFilters(rawData);
+    // default working data is entire dataset
+    workingData = [...rawData];
+    document.getElementById('dataSummary').textContent = summarizeData(workingData);
+    const yrs = workingData.map(d=>d.Year);
+    document.getElementById('yearRange').textContent = yrs.length ? `${Math.min(...yrs)} — ${Math.max(...yrs)}` : '—';
+    drawAllCharts();
+  } catch (e) {
+    alert('Failed to parse JSON: ' + e.message);
+  }
+}
+
+// File input handler (upload from user's local machine)
+document.getElementById('fileInput').addEventListener('change', function(evt){
+  const f = evt.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    handleJSONLoad(e.target.result);
+  };
+  reader.readAsText(f);
+});
+
+// Load sample data (attempt fetch from environment path)
+document.getElementById('loadSample').addEventListener('click', async function(){
+  try {
+    const res = await fetch(sampleUrl);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    handleJSONLoad(data);
+  } catch (err) {
+    alert('Could not load sample JSON from server path: ' + sampleUrl + '\\n' + err.message + '\\nInstead, please upload your JSON via the file picker.');
+  }
+});
+
+// Filters
+document.getElementById('regionFilter').addEventListener('change', applyFilters);
+document.getElementById('countryFilter').addEventListener('change', applyFilters);
+document.getElementById('resetFilters').addEventListener('click', function(){
+  document.getElementById('regionFilter').value = 'All';
+  document.getElementById('countryFilter').value = 'All';
+  applyFilters();
+});
+
+// Initialize with sample attempt (do not auto-fetch to avoid blocked cross-origin). User can click Load sample.
+document.getElementById('dataSummary').textContent = 'No data loaded. Use the file picker or click "Load sample data".';
+</script>
+</body>
+</html>
